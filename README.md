@@ -42,6 +42,24 @@ Windowsissa voit myös tuplaklikata `Kaynnista.bat`-tiedostoa.
 
 Sovellus toimii täysin ilman verkkoyhteyttä.
 
+### Windows-sovellukseksi (.exe)
+
+`Rakenna_exe.bat` tekee laskurista oman Windows-sovelluksen:
+
+1. **Rakennus:** PyInstaller rakentaa `Opintolainalaskuri.exe`:n kuvakkeella `kuvake/kuvake.ico`.
+2. **Asennus:** sovellus kopioidaan kansioon `%LOCALAPPDATA%\Programs\Opintolainalaskuri`.
+3. **Pikakuvakkeet:** pikakuvake tehdään työpöydälle ja Käynnistä-valikkoon, joten sovellus löytyy myös Windowsin haulla.
+
+Asenna PyInstaller kerran:
+
+```bash
+python -m pip install --user pyinstaller
+```
+
+Aja `Rakenna_exe.bat` aina, kun `opintolainalaskuri.py` muuttuu. Sulje sovellus ensin.
+
+Valmis sovellus toimii myös koneissa, joissa ei ole Pythonia. Sen koko on noin 41 Mt.
+
 ## Tarkistuslaskelmat
 
 Laske skenaariot ja tarkistukset komentorivillä:

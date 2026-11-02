@@ -38,6 +38,8 @@ Korko lasketaan todelliset päivät / 360 (vastaa Dansken omaa esimerkkilaskelma
 import calendar
 import datetime as dt
 import math
+import os
+import sys
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
@@ -654,6 +656,12 @@ def simulate(s: Settings, b: Bank, horizon: int = 0, account: Optional[str] = No
     return res
 
 
+def resource_path(*parts: str) -> str:
+    """Tiedostopolku sekä skriptinä että PyInstallerin .exe-paketista ajettaessa."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
 def default_start() -> YM:
     t = dt.date.today()
     return t.year, t.month
@@ -1227,7 +1235,22 @@ class App(tk.Tk):
         return int(round(px * self.sc))
 
     def _icon(self):
+        # Ikkunan ja tehtäväpalkin kuvake PNG:stä usealla koolla (Tk ei lue PNG-pakattua .ico:ta).
+        png = resource_path("kuvake", "kuvake-256.png")
         try:
+            if os.path.exists(png):
+                if HAVE_PIL:
+                    src = Image.open(png).convert("RGBA")
+                    lz = getattr(Image, "Resampling", Image).LANCZOS
+                    self._imgs = [ImageTk.PhotoImage(src.resize((n, n), lz), master=self)
+                                  for n in (256, 64, 48, 32, 24, 16)]
+                else:
+                    self._imgs = [tk.PhotoImage(file=png, master=self)]
+                self.iconphoto(True, *self._imgs)
+                return
+        except (tk.TclError, OSError):
+            pass
+        try:  # varakuvake, jos kuvake-kansio puuttuu
             img = tk.PhotoImage(width=32, height=32)
             img.put(C["bg"], to=(0, 0, 32, 32))
             img.put(C["blue"], to=(3, 3, 29, 29))
@@ -1950,6 +1973,10 @@ def main():
     try:  # terävä teksti Windowsin skaalatuilla näytöillä
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        if not getattr(sys, "frozen", False):
+            # Skriptinä ajettaessa oma tehtäväpalkkikuvake Pythonin logon sijaan.
+            # (.exe-versiossa Windows käyttää exen omaa kuvaketta.)
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TomasVallas.Opintolainalaskuri")
     except Exception:
         pass
     App().mainloop()
