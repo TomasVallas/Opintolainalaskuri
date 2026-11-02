@@ -39,7 +39,6 @@ import calendar
 import datetime as dt
 import math
 import os
-import sys
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
@@ -657,9 +656,8 @@ def simulate(s: Settings, b: Bank, horizon: int = 0, account: Optional[str] = No
 
 
 def resource_path(*parts: str) -> str:
-    """Tiedostopolku sekä skriptinä että PyInstallerin .exe-paketista ajettaessa."""
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, *parts)
+    """Tiedostopolku sovelluksen kansiosta (esim. kuvake/kuvake-256.png)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), *parts)
 
 
 def default_start() -> YM:
@@ -1207,6 +1205,44 @@ KPI_ROWS = [
 ]
 
 
+APP_ID = "TomasVallas.Opintolainalaskuri"
+
+
+def set_window_app_id(hwnd: int, app_id: str = APP_ID) -> None:
+    """Ikkunakohtainen sovellustunniste (Windows), jotta tehtäväpalkissa näkyy oma kuvake
+    eikä Pythonin logo – toimii myös Microsoft Storen Pythonilla."""
+    import ctypes
+    from ctypes import wintypes as wt
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", wt.DWORD), ("d2", wt.WORD), ("d3", wt.WORD), ("d4", ctypes.c_ubyte * 8)]
+
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = [("fmtid", GUID), ("pid", wt.DWORD)]
+
+    class PROPVARIANT(ctypes.Structure):
+        _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                    ("r3", ctypes.c_ushort), ("val", ctypes.c_wchar_p), ("pad", ctypes.c_void_p)]
+
+    def guid(s: str) -> GUID:
+        g = GUID()
+        ctypes.windll.ole32.CLSIDFromString(ctypes.c_wchar_p(s), ctypes.byref(g))
+        return g
+
+    iid_store = guid("{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}")                  # IPropertyStore
+    key = PROPERTYKEY(guid("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}"), 5)       # PKEY_AppUserModel_ID
+    store = ctypes.c_void_p()
+    if ctypes.windll.shell32.SHGetPropertyStoreForWindow(wt.HWND(hwnd), ctypes.byref(iid_store),
+                                                         ctypes.byref(store)) != 0:
+        return
+    vt = ctypes.cast(store, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    value = PROPVARIANT(31, 0, 0, 0, app_id, None)                             # VT_LPWSTR
+    ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(PROPERTYKEY),
+                       ctypes.POINTER(PROPVARIANT))(vt[6])(store, ctypes.byref(key), ctypes.byref(value))
+    ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vt[7])(store)           # Commit
+    ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vt[2])(store)          # Release
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1219,6 +1255,12 @@ class App(tk.Tk):
         self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 20)}")
         self.minsize(min(int(1150 * sc), w), min(int(700 * sc), h))
         self._icon()
+        if os.name == "nt":
+            try:
+                self.update_idletasks()
+                set_window_app_id(int(self.wm_frame(), 16))
+            except Exception:
+                pass
         self._fonts()
         self._style()
         self.vars: Dict[str, tk.Variable] = {}
@@ -1973,10 +2015,8 @@ def main():
     try:  # terävä teksti Windowsin skaalatuilla näytöillä
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        if not getattr(sys, "frozen", False):
-            # Skriptinä ajettaessa oma tehtäväpalkkikuvake Pythonin logon sijaan.
-            # (.exe-versiossa Windows käyttää exen omaa kuvaketta.)
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TomasVallas.Opintolainalaskuri")
+        # Oma tehtäväpalkkikuvake Pythonin logon sijaan (ks. myös set_window_app_id)
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
     except Exception:
         pass
     App().mainloop()
