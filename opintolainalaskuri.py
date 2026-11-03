@@ -866,6 +866,7 @@ class Slider(tk.Canvas):
 
     def _wheel(self, e):
         self._nudge(1 if e.delta > 0 else -1)
+        return "break"  # ei rullata samalla koko paneelia
 
     def _nudge(self, d: int):
         self._set(self.var.get() + d * self.step)
@@ -935,20 +936,61 @@ class Segmented(tk.Frame):
 
 
 class ScrollFrame(tk.Frame):
-    def __init__(self, master, bg: str, width: int):
+    """Pystysuunnassa rullattava alue.
+
+    grow: widget (esim. kuvaaja), joka venyy täyttämään vapaan korkeuden, mutta ei
+    kutistu alle grow_min-korkeuden – silloin alue alkaa rullata.
+    autohide: vierityspalkki näkyy vain, kun sisältö ei mahdu."""
+
+    def __init__(self, master, bg: str, width: int = 0, autohide: bool = False):
         super().__init__(master, bg=bg)
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0, width=width)
         self.sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview,
                                 style="Dark.Vertical.TScrollbar")
         self.inner = tk.Frame(self.canvas, bg=bg)
         self.win = self.canvas.create_window(0, 0, window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.win, width=e.width))
+        self.autohide = autohide
+        self.grow: Optional[tk.Widget] = None
+        self.grow_min = 0
+        self._job = None
+        self.inner.bind("<Configure>", self._schedule_fit)
+        self.canvas.bind("<Configure>", self._canvas_resized)
         self.canvas.configure(yscrollcommand=self.sb.set)
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.sb.pack(side="right", fill="y")
+        if not autohide:
+            self.sb.pack(side="right", fill="y")
         self.bind("<Enter>", lambda e: self.bind_all("<MouseWheel>", self._wheel))
         self.bind("<Leave>", lambda e: self.unbind_all("<MouseWheel>"))
+
+    def _canvas_resized(self, e):
+        self.canvas.itemconfigure(self.win, width=e.width)
+        self._schedule_fit()
+
+    def _schedule_fit(self, _e=None):
+        if self._job is None:
+            self._job = self.after(15, self._fit)
+
+    def _fit(self):
+        self._job = None
+        self.update_idletasks()
+        ch = self.canvas.winfo_height()
+        if ch < 2:
+            return
+        if self.grow is not None:
+            cur = self.grow.winfo_reqheight()
+            want = max(self.grow_min, ch - (self.inner.winfo_reqheight() - cur))
+            if want != cur:
+                self.grow.configure(height=want)
+                self.update_idletasks()
+        if self.autohide:
+            # Kapeampi alue vain lisää korkeutta, joten palkki ei jää vilkkumaan.
+            need = self.inner.winfo_reqheight() > ch + 1
+            if need and not self.sb.winfo_ismapped():
+                self.sb.pack(side="right", fill="y", before=self.canvas)
+            elif not need and self.sb.winfo_ismapped():
+                self.sb.pack_forget()
+                self.canvas.yview_moveto(0)
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _wheel(self, e):
         if self.inner.winfo_height() > self.canvas.winfo_height():
@@ -1206,6 +1248,7 @@ KPI_ROWS = [
 
 
 APP_ID = "TomasVallas.Opintolainalaskuri"
+CHART_MIN_H = 340  # kuvaajan vähimmäiskorkeus (px @ 100 %); matalalla näytöllä oikea puoli rullaa
 
 
 def set_window_app_id(hwnd: int, app_id: str = APP_ID) -> None:
@@ -1424,10 +1467,14 @@ class App(tk.Tk):
         body.pack(fill="both", expand=True, padx=S(22), pady=(0, S(16)))
         left = ScrollFrame(body, C["bg"], S(430))
         left.pack(side="left", fill="y")
-        right = tk.Frame(body, bg=C["bg"])
+        # Oikea puoli rullaa, jos näyttö on matala: kuvaaja täyttää vapaan tilan,
+        # mutta pysyy vähintään CHART_MIN_H korkeana.
+        right = ScrollFrame(body, C["bg"], autohide=True)
         right.pack(side="left", fill="both", expand=True, padx=(S(16), 0))
         self._build_inputs(left.inner)
-        self._build_outputs(right)
+        self._build_outputs(right.inner)
+        self.chart.configure(height=S(CHART_MIN_H))
+        right.grow, right.grow_min = self.chart, S(CHART_MIN_H)
 
     def _build_inputs(self, root):
         S = self.S
