@@ -42,6 +42,20 @@ Windowsissa voit myös tuplaklikata `Kaynnista.bat`-tiedostoa.
 
 Sovellus toimii täysin ilman verkkoyhteyttä.
 
+### Linux
+
+Linuxissa Tkinter ja Pillow asennetaan paketinhallinnasta. Esimerkiksi Ubuntussa ja Debianissa:
+
+```bash
+sudo apt install python3-tk python3-pil python3-pil.imagetk
+```
+
+Käynnistä sovellus:
+
+```bash
+./kaynnista.sh
+```
+
 ## Tarkistuslaskelmat
 
 Laske skenaariot ja tarkistukset komentorivillä:

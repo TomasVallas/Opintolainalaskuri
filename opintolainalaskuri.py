@@ -769,6 +769,18 @@ except Exception:  # pragma: no cover
 
 SS = 4  # ylinäytteistys: piirretään 4x tarkkuudella ja pienennetään
 
+# Hiiren rulla: Windows lähettää <MouseWheel>, Linuxin Tk 8.6 painikkeet 4 (ylös) ja 5 (alas).
+WHEEL_EVENTS = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+
+
+def wheel_step(e) -> int:
+    """Vieritysrivit: negatiivinen = ylös, positiivinen = alas."""
+    if e.num == 4:
+        return -1
+    if e.num == 5:
+        return 1
+    return int(-e.delta / 120)
+
 C = {
     "bg": "#0B0F15",
     "card": "#121821",
@@ -845,7 +857,8 @@ class Slider(tk.Canvas):
         for ev in ("<Button-1>", "<B1-Motion>"):
             self.bind(ev, self._drag)
         self.bind("<Configure>", lambda e: self.draw())
-        self.bind("<MouseWheel>", self._wheel)
+        for ev in WHEEL_EVENTS:
+            self.bind(ev, self._wheel)
         self.bind("<Left>", lambda e: self._nudge(-1))
         self.bind("<Right>", lambda e: self._nudge(1))
         variable.trace_add("write", lambda *a: self.draw())
@@ -865,7 +878,7 @@ class Slider(tk.Canvas):
         self._set(self.lo + frac * (self.hi - self.lo))
 
     def _wheel(self, e):
-        self._nudge(1 if e.delta > 0 else -1)
+        self._nudge(1 if e.num == 4 or e.delta > 0 else -1)
         return "break"  # ei rullata samalla koko paneelia
 
     def _nudge(self, d: int):
@@ -959,8 +972,15 @@ class ScrollFrame(tk.Frame):
         self.canvas.pack(side="left", fill="both", expand=True)
         if not autohide:
             self.sb.pack(side="right", fill="y")
-        self.bind("<Enter>", lambda e: self.bind_all("<MouseWheel>", self._wheel))
-        self.bind("<Leave>", lambda e: self.unbind_all("<MouseWheel>"))
+        self.bind("<Enter>", lambda e: self._bind_wheel(True))
+        self.bind("<Leave>", lambda e: self._bind_wheel(False))
+
+    def _bind_wheel(self, on: bool):
+        for ev in WHEEL_EVENTS:
+            if on:
+                self.bind_all(ev, self._wheel)
+            else:
+                self.unbind_all(ev)
 
     def _canvas_resized(self, e):
         self.canvas.itemconfigure(self.win, width=e.width)
@@ -994,7 +1014,7 @@ class ScrollFrame(tk.Frame):
 
     def _wheel(self, e):
         if self.inner.winfo_height() > self.canvas.winfo_height():
-            self.canvas.yview_scroll(int(-e.delta / 120), "units")
+            self.canvas.yview_scroll(wheel_step(e), "units")
 
 
 class Chart(tk.Canvas):
