@@ -125,7 +125,7 @@ for yrs in (1, 2, 3):
     r = simulate(s, banks[1])
     print(f"Danske, lyhennys {yrs} v hyvityksen jälkeen: {fmt_ym(r.amort_start)}-{fmt_ym(r.payoff)} korot {r.interest:.2f} jää {r.payoff_net:.0f}")
 
-print("\n=== Danske: korkojen maksu heti + sweet spot (lisäerä kevään 2029 erän mukana) ===")
+print("\n=== Danske: korkojen maksu heti + sweet spot (lisäerä valmistumislukukaudella 1/2029) ===")
 from dataclasses import replace
 dan = banks[1]
 s_sw = replace(base, draw_cap_on=True, pay_interest=2, cap_plus_paid=True, return_pct=0.0)
@@ -138,11 +138,13 @@ assert abs(r_sw.topup - r_sw.paid_early_study) < 0.01 and abs(r_sw.credit_base -
 
 # Riippumaton tarkistus päivän tarkkuudella: nostot oikeina päivinä, pääomitus 15.6./15.12.,
 # maksu samana päivänä, valmistumislukukauden pääomitus maksetaan 1.8.2029.
+# Nostot oletuksilla: 1. erä 3 400 €, sitten täydet erät, kunnes 18 000 €:n katto täyttyy syksyllä 2028.
 import datetime as _dt
 D = _dt.date
 rate = 0.03306
-draws_d = [(D(2026, 11, 1), 1700), (D(2027, 1, 1), 4250), (D(2027, 9, 1), 3400),
-           (D(2028, 1, 1), 4250), (D(2028, 9, 1), 3400), (D(2029, 1, 1), 1000)]
+draws_d = [(D(2026, 11, 1), 3400), (D(2027, 1, 1), 4250), (D(2027, 9, 1), 3400),
+           (D(2028, 1, 1), 4250), (D(2028, 9, 1), 2700)]
+assert [a for _ym, k, a in r_sw.schedule if k == "draw"] == [a for _d, a in draws_d]
 caps = [D(2026, 12, 15), D(2027, 6, 15), D(2027, 12, 15), D(2028, 6, 15), D(2028, 12, 15), D(2029, 6, 15)]
 def day_sched(topup):
     ev = sorted([(d, 0, a) for d, a in draws_d] + [(D(2029, 1, 1), 0, topup)] + [(d, 1, 0) for d in caps])
@@ -166,6 +168,7 @@ for _ in range(5):
 for d, a in out:
     print(f"   päivä {d.day}.{d.month}.{d.year}: pääomitus {a:8.2f}")
 print(f"   päivän tarkkuudella lisäerä {t:.2f} (laskuri {r_sw.topup:.2f}, ero {t - r_sw.topup:+.2f})")
+assert abs(t - r_sw.topup) < 0.01
 
 print("\n=== Danske: säästö korkoa korolle -ilmiöstä (katto 18 000 €) ===")
 for ret in (0.0, 2.0, 3.3, 6.0):

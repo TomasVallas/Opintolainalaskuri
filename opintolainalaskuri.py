@@ -96,6 +96,7 @@ class Settings:
     start_year: int
     start_month: int
     monthly_draw: float = 850.0
+    first_draw: Optional[float] = 3400.0  # ensimmäinen nostoerä (1. lukukausi), None = kk × €/kk
     years_left: int = 3
     months_per_year: int = 9
     draw_cap_on: bool = False      # nostetaan enintään draw_cap euroa
@@ -112,6 +113,7 @@ class Settings:
     credit_max_loan: float = 18000.0
     pay_interest: int = 0          # 0 = ei, 1 = kerran vuodessa, 2 = jokaisen pääomituksen jälkeen,
                                    # 3 = vasta valmistumislukukauden jälkeen (ei pienennä hyvitystä)
+    initial_invest: float = 2550.0  # alkusijoitus: omaa rahaa lainan lisäksi, sijoitetaan 1. noston kanssa
     return_pct: float = 6.0        # kokonaistuotto %/v ennen kuluja (sis. osingot)
     tax_pct: float = 30.0
     account: str = "AOT"           # "AOT" = arvo-osuustili, "OST" = osakesäästötili
@@ -177,9 +179,10 @@ class Result:
     inv_costs: float = 0.0         # kaupankäynti, valuutanvaihto, juokseva kulu, tilimaksut
     inv_taxes: float = 0.0         # jo maksetut verot (myyntivoitot, osingot, nostot)
     tax_total: float = 0.0         # verot yhteensä, kun loputkin myydään
-    own_money: float = 0.0
+    own_money: float = 0.0         # omaa rahaa lainanmaksuun, kun salkku ei riitä
+    initial: float = 0.0           # alkusijoitus (omaa rahaa)
     payoff_after_tax: float = 0.0  # salkku verojen jälkeen, kun laina on maksettu
-    payoff_net: float = 0.0        # sama miinus oma raha
+    payoff_net: float = 0.0        # sama miinus oma raha (alkusijoitus + lisäraha)
     final_after_tax: float = 0.0   # tarkastelujakson lopussa
     final_net_after_tax: float = 0.0
     graduation: Optional[YM] = None
@@ -237,19 +240,23 @@ def _loan(s: Settings, b: Bank, horizon: int = 0, topup: float = 0.0) -> Result:
         return res
 
     # --- Nostojen määrät (mahdollinen katto) ------------------------------
-    total_months = sum(g[1] for g in groups)
-    res.full_draw = total_months * s.monthly_draw
+    # Täysi erä = tukikuukaudet × €/kk. Ensimmäisen lukukauden erän voi antaa euroina
+    # (esim. takaus alkoi jo syyskuussa, vaikka ensimmäinen nosto tehdään marraskuussa).
+    full = [g[1] * s.monthly_draw for g in groups]
+    if s.first_draw is not None:
+        full[0] = max(0.0, s.first_draw)
+    res.full_draw = sum(full)
     capped = s.draw_cap_on and s.draw_cap < res.full_draw
     amounts = []
     if not capped:
-        amounts = [g[1] * s.monthly_draw for g in groups]
+        amounts = list(full)
     elif s.draw_even:
-        per = max(0.0, s.draw_cap) / total_months
-        amounts = [g[1] * per for g in groups]
+        k_even = max(0.0, s.draw_cap) / res.full_draw     # sama osuus jokaisesta erästä
+        amounts = [fa * k_even for fa in full]
     else:
         left = max(0.0, s.draw_cap)
-        for g in groups:
-            a = min(g[1] * s.monthly_draw, left)
+        for fa in full:
+            a = min(fa, left)
             left -= a
             amounts.append(a)
 
@@ -278,8 +285,9 @@ def _loan(s: Settings, b: Bank, horizon: int = 0, topup: float = 0.0) -> Result:
         grad_end, credit_at = (gy, 7), (gy, 11)
     else:            # syyslukukaudella
         grad_end, credit_at = (gy, 12), (gy + 1, 4)
-    ly, lm = res.last_support                # pääomitus: tuen ajan + 1 lukukausi
-    last_cap = (ly, 12) if lm <= 7 else (ly + 1, 6)
+    # Pääomitus: opintotuen ajan + 1 lukukausi. Tuki (valtiontakaus) on voimassa
+    # valmistumiseen asti, vaikka katto täyttyisi ja viimeiset erät jäisivät nostamatta.
+    last_cap = (gy, 12) if gm <= 7 else (gy + 1, 6)
     io1, io2 = add_months(*last_cap, 6), add_months(*last_cap, 12)
     T = max(0, int(round(s.repay_years * 12)))
     if s.repay_start == 1:
@@ -301,7 +309,7 @@ def _loan(s: Settings, b: Bank, horizon: int = 0, topup: float = 0.0) -> Result:
     sweet = s.draw_cap_on and s.cap_plus_paid and s.pay_interest in (1, 2)
     i_top = groups[-1][0]
     last_year = groups[-1][2]
-    room = sum(nm * s.monthly_draw - a for (_i, nm, k, _f, _l), a in zip(groups, amounts) if k == last_year)
+    room = sum(fa - a for g, fa, a in zip(groups, full, amounts) if g[2] == last_year)
     t_amt = max(0.0, min(topup, room)) if sweet else 0.0
     if t_amt > 0.005:
         draws.setdefault(i_top, []).append((t_amt, b.draw_fee, "topup"))
@@ -448,12 +456,15 @@ def _loan(s: Settings, b: Bank, horizon: int = 0, topup: float = 0.0) -> Result:
 
 
 def _invest(s: Settings, res: Result, account: str) -> None:
-    """Sijoittaa nostot ja maksaa lainan salkusta. AOT: FIFO, myyntivoittovero
-    vuosittain, pienten luovutusten vapautus, tappiot vähennetään 5 v.
-    OST: ei veroa kaupoista eikä osingoista, nostosta vero voitto-osuuden mukaan."""
+    """Sijoittaa nostot (ja alkusijoituksen) ja maksaa lainan salkusta. AOT: FIFO,
+    myyntivoittovero vuosittain, pienten luovutusten vapautus, tappiot vähennetään 5 v.
+    OST: ei veroa kaupoista eikä osingoista, nostosta vero voitto-osuuden mukaan.
+    Alkusijoitus on omaa rahaa: se sijoitetaan ensimmäisen noston kanssa ja vähennetään
+    nettotuloksista samoin kuin lainanmaksuun tarvittu oma raha."""
     n = len(res.months)
     if n == 0:
         return
+    res.initial = init = max(0.0, s.initial_invest)
     t = max(0.0, min(0.99, s.tax_pct / 100.0))
     d = max(0.0, s.dividend_pct / 100.0)
     price_m = max(1e-9, 1.0 + s.return_pct / 100.0 - d) ** (1.0 / 12.0)
@@ -579,7 +590,7 @@ def _invest(s: Settings, res: Result, account: str) -> None:
     out_f = res.flows_out
     for i in range(n):
         y, m = res.months[i]
-        a = res.flows_in[i]
+        a = res.flows_in[i] + (init if i == 0 else 0.0)
         if a > 0:
             if ost:
                 deposits += a
@@ -625,15 +636,15 @@ def _invest(s: Settings, res: Result, account: str) -> None:
 
         lv, latent = liquidation(i, y)
         res.portfolio.append(units_value() + cash + inner)
-        res.net.append(lv - res.balance[i] - own)
+        res.net.append(lv - res.balance[i] - own - init)
         if i == res.i_end:
             res.payoff_after_tax = lv
-            res.payoff_net = lv - own
+            res.payoff_net = lv - own - init
             res.tax_total = res.inv_taxes + latent
 
     res.own_money = own
     res.final_after_tax, latent = liquidation(n - 1, res.months[-1][0])
-    res.final_net_after_tax = res.final_after_tax - own
+    res.final_net_after_tax = res.final_after_tax - own - init
     if n - 1 > res.i_end:
         res.tax_total = res.inv_taxes + latent
 
@@ -793,6 +804,7 @@ C = {
     "faint": "#5A6677",
     "blue": "#3B82F6",
     "blue2": "#60A5FA",
+    "dim": "#1E3354",       # pois käytöstä olevan kytkimen päällä-väri
     "sky": "#7DD3FC",
     "purple": "#C084FC",
     "area": "#10213B",
@@ -807,42 +819,58 @@ class Toggle(tk.Canvas):
         super().__init__(master, width=self.w, height=self.h, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
         self.var, self.sc, self.bgcol, self.command = variable, sc, bg, command
-        self._imgs: Dict[bool, object] = {}
+        self.enabled = True
+        self._imgs: Dict[Tuple[bool, bool], object] = {}
         self.bind("<Button-1>", self._click)
         variable.trace_add("write", lambda *a: self.draw())
         self.draw()
 
+    def set_enabled(self, on: bool):
+        """Pois käytöstä: himmeä eikä reagoi klikkaukseen (arvo säilyy)."""
+        if on != self.enabled:
+            self.enabled = on
+            self.configure(cursor="hand2" if on else "arrow")
+            self.draw()
+
     def _click(self, _e=None):
+        if not self.enabled:
+            return
         self.var.set(not self.var.get())
         if self.command:
             self.command()
 
+    def _colors(self, on: bool) -> Tuple[str, str]:
+        if not self.enabled:
+            return (C["dim"] if on else C["grid"]), C["faint"]
+        return (C["blue"] if on else C["border"]), "#FFFFFF"
+
     def _render(self, on: bool):
         w, h = self.w, self.h
+        track, knob = self._colors(on)
         img = Image.new("RGB", (w * SS, h * SS), self.bgcol)
         d = ImageDraw.Draw(img)
-        d.rounded_rectangle([0, 0, w * SS - 1, h * SS - 1], radius=h * SS / 2,
-                            fill=C["blue"] if on else C["border"])
+        d.rounded_rectangle([0, 0, w * SS - 1, h * SS - 1], radius=h * SS / 2, fill=track)
         p = 3 * self.sc * SS
         x = (w - h) * SS if on else 0
-        d.ellipse([x + p, p, x + h * SS - p, h * SS - p], fill="#FFFFFF")
+        d.ellipse([x + p, p, x + h * SS - p, h * SS - p], fill=knob)
         return ImageTk.PhotoImage(img.resize((w, h), _BOX))
 
     def draw(self):
         self.delete("all")
         w, h, on = self.w, self.h, bool(self.var.get())
         if HAVE_PIL:
-            if on not in self._imgs:
-                self._imgs[on] = self._render(on)
-            self.create_image(0, 0, image=self._imgs[on], anchor="nw")
+            key = (on, self.enabled)
+            if key not in self._imgs:
+                self._imgs[key] = self._render(on)
+            self.create_image(0, 0, image=self._imgs[key], anchor="nw")
             return
-        col = C["blue"] if on else C["border"]
+        col, knob = self._colors(on)
         self.create_oval(0, 0, h, h, fill=col, outline=col)
         self.create_oval(w - h, 0, w, h, fill=col, outline=col)
         self.create_rectangle(h / 2, 0, w - h / 2, h, fill=col, outline=col)
         p = 3 * self.sc
         x = w - h if on else 0
-        self.create_oval(x + p, p, x + h - p, h - p, fill="#FFFFFF", outline="")
+        self.create_oval(x + p, p, x + h - p, h - p, fill=knob, outline="")
 
 
 class Slider(tk.Canvas):
@@ -1328,6 +1356,7 @@ class App(tk.Tk):
         self._style()
         self.vars: Dict[str, tk.Variable] = {}
         self.entries: Dict[str, tk.Entry] = {}
+        self.toggles: Dict[str, Toggle] = {}
         self._job = None
         self._loading_preset = False
         self.results: Dict[str, Result] = {}
@@ -1435,8 +1464,8 @@ class App(tk.Tk):
                        fg=fg or C["text"], font=self.f["body"], justify="left", anchor="w")
         lbl.grid(row=r, column=0, columnspan=2, sticky="w", pady=pady or self.S(3))
         self.vars[key] = tk.BooleanVar(value=False)
-        Toggle(parent, self.vars[key], self.sc, C["card"], self.schedule).grid(
-            row=r, column=2, sticky="e", pady=pady or self.S(3))
+        self.toggles[key] = Toggle(parent, self.vars[key], self.sc, C["card"], self.schedule)
+        self.toggles[key].grid(row=r, column=2, sticky="e", pady=pady or self.S(3))
         return lbl
 
     def combo(self, parent, key: str, values: List[str], width: int = 30) -> ttk.Combobox:
@@ -1502,21 +1531,22 @@ class App(tk.Tk):
 
         _, b = self.card(root, "Opintolaina", **pad)
         self.row(b, 0, "Ensimmäinen nostokuukausi (kk/vvvv)", "start")
-        self.row(b, 1, "Opintolaina kuukaudessa", "monthly_draw", "€/kk")
-        self.row(b, 2, "Lukuvuosia jäljellä (sis. nykyinen)", "years_left", "v")
-        self.row(b, 3, "Tukikuukausia lukuvuodessa", "months_per_year", "kk")
+        self.row(b, 1, "Ensimmäinen nostoerä", "first_draw", "€")     # tyhjä = tukikk × €/kk
+        self.row(b, 2, "Opintolaina kuukaudessa", "monthly_draw", "€/kk")
+        self.row(b, 3, "Lukuvuosia jäljellä (sis. nykyinen)", "years_left", "v")
+        self.row(b, 4, "Tukikuukausia lukuvuodessa", "months_per_year", "kk")
         self.cap_text = tk.StringVar(value="Nosta vain hyvityskaton verran")
-        self.toggle_row(b, 4, "draw_cap_on", textvariable=self.cap_text, pady=(S(8), S(3)))
-        self.toggle_row(b, 5, "cap_plus_paid", text="+ opintojen aikana maksettavat korot\n   (sweet spot)",
-                        fg=C["muted"])
-        self.label(b, "Nostojen jako, kun katto on päällä").grid(row=6, column=0, columnspan=3, sticky="w",
+        self.toggle_row(b, 5, "draw_cap_on", textvariable=self.cap_text, pady=(S(8), S(3)))
+        self.sweet_lbl = self.toggle_row(b, 6, "cap_plus_paid",
+                                         text="+ opintojen aikana maksettavat korot\n   (sweet spot)", fg=C["muted"])
+        self.label(b, "Nostojen jako, kun katto on päällä").grid(row=7, column=0, columnspan=3, sticky="w",
                                                                  pady=(S(4), S(3)))
-        self.combo(b, "draw_mode", DRAW_MODES, width=40).grid(row=7, column=0, columnspan=3, sticky="we")
-        self.label(b, "Lyhennystapa").grid(row=8, column=0, sticky="w", pady=(S(8), S(3)))
-        self.combo(b, "repay_type", REPAY_TYPES, width=20).grid(row=8, column=1, columnspan=2, sticky="e",
+        self.combo(b, "draw_mode", DRAW_MODES, width=40).grid(row=8, column=0, columnspan=3, sticky="we")
+        self.label(b, "Lyhennystapa").grid(row=9, column=0, sticky="w", pady=(S(8), S(3)))
+        self.combo(b, "repay_type", REPAY_TYPES, width=20).grid(row=9, column=1, columnspan=2, sticky="e",
                                                                 pady=(S(8), S(3)))
         self.info_loan = self.note(b)
-        self.info_loan.grid(row=9, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
+        self.info_loan.grid(row=10, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
 
         _, b = self.card(root, "Korko ja pääomitus", **pad)
         self.row(b, 0, "12 kk Euribor", "euribor", "%")
@@ -1539,24 +1569,25 @@ class App(tk.Tk):
         self.vars["account"] = tk.StringVar(value="AOT")
         self.seg_acc = Segmented(b, ACCOUNTS, self.vars["account"], self.sc, self.f["small"], self.schedule)
         self.seg_acc.grid(row=0, column=1, columnspan=2, sticky="e", pady=S(3))
-        self.label(b, "Sijoituskohde").grid(row=1, column=0, columnspan=3, sticky="w", pady=(S(6), S(3)))
+        self.row(b, 1, "Alkusijoitus (omaa rahaa lainan lisäksi)", "initial_invest", "€")
+        self.label(b, "Sijoituskohde").grid(row=2, column=0, columnspan=3, sticky="w", pady=(S(6), S(3)))
         cb = self.combo(b, "preset", [p[0] for p in INVEST_PRESETS], width=40)
-        cb.grid(row=2, column=0, columnspan=3, sticky="we")
+        cb.grid(row=3, column=0, columnspan=3, sticky="we")
         cb.bind("<<ComboboxSelected>>", self._preset_changed, add="+")
-        self.row(b, 3, "Kaupankäyntipalkkio", "fee_pct", "%")
-        self.row(b, 4, "Minimipalkkio / kauppa", "min_fee", "€")
-        self.row(b, 5, "Valuutanvaihto", "fx_pct", "%")
-        self.row(b, 6, "Juokseva kulu", "ter_pct", "%/v")
-        self.row(b, 7, "Osinkotuotto (osa tuotosta)", "dividend_pct", "%/v")
-        self.row(b, 8, "Kuukausimaksu", "account_fee", "€/kk")
-        self.row(b, 9, "Pääomatulovero", "tax_pct", "%")
-        self.label(b, "Myyn sijoituksia lainanmaksuun").grid(row=10, column=0, columnspan=3, sticky="w",
+        self.row(b, 4, "Kaupankäyntipalkkio", "fee_pct", "%")
+        self.row(b, 5, "Minimipalkkio / kauppa", "min_fee", "€")
+        self.row(b, 6, "Valuutanvaihto", "fx_pct", "%")
+        self.row(b, 7, "Juokseva kulu", "ter_pct", "%/v")
+        self.row(b, 8, "Osinkotuotto (osa tuotosta)", "dividend_pct", "%/v")
+        self.row(b, 9, "Kuukausimaksu", "account_fee", "€/kk")
+        self.row(b, 10, "Pääomatulovero", "tax_pct", "%")
+        self.label(b, "Myyn sijoituksia lainanmaksuun").grid(row=11, column=0, columnspan=3, sticky="w",
                                                             pady=(S(6), S(3)))
-        self.combo(b, "sell_mode", SELL_MODES, width=40).grid(row=11, column=0, columnspan=3, sticky="we")
+        self.combo(b, "sell_mode", SELL_MODES, width=40).grid(row=12, column=0, columnspan=3, sticky="we")
         self.info_inv = self.note(b)
-        self.info_inv.grid(row=12, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
+        self.info_inv.grid(row=13, column=0, columnspan=3, sticky="w", pady=(S(8), 0))
         self.warn_inv = self.note(b, fg=C["red"])
-        self.warn_inv.grid(row=13, column=0, columnspan=3, sticky="w", pady=(S(4), 0))
+        self.warn_inv.grid(row=14, column=0, columnspan=3, sticky="w", pady=(S(4), 0))
 
         _, b = self.card(root, "Pankkien korot ja kulut", **pad)
         for c, (_key, name) in enumerate(BANK_KEYS, start=1):
@@ -1681,9 +1712,10 @@ class App(tk.Tk):
     def reset_defaults(self):
         y, m = default_start()
         d = {
-            "start": f"{m}/{y}", "monthly_draw": "850", "years_left": "3", "months_per_year": "9",
+            "start": f"{m}/{y}", "first_draw": "3400", "monthly_draw": "850", "years_left": "3",
+            "months_per_year": "9",
             "euribor": "3,306", "credit_pct": "40", "credit_deductible": "2500",
-            "credit_max_loan": "18000", "tax_pct": "30",
+            "credit_max_loan": "18000", "tax_pct": "30", "initial_invest": "2550",
         }
         for bank, (key, _name) in zip(default_banks(), BANK_KEYS):
             for fld in BANK_FIELDS:
@@ -1774,9 +1806,20 @@ class App(tk.Tk):
             err.append("start")
             sm, sy = 1, 2000
         max_loan = self._num("credit_max_loan", 0, 1e6, err)
+        if self.vars["first_draw"].get().strip():
+            first_draw = self._num("first_draw", 0, 1e6, err)
+        else:                                   # tyhjä = tukikuukaudet × €/kk
+            self._mark(self.entries["first_draw"], True)
+            first_draw = None
+        if self.vars["initial_invest"].get().strip():
+            initial = self._num("initial_invest", 0, 1e7, err)
+        else:                                   # tyhjä = ei alkusijoitusta
+            self._mark(self.entries["initial_invest"], True)
+            initial = 0.0
         s = Settings(
             start_year=sy, start_month=sm,
             monthly_draw=self._num("monthly_draw", 0, 5000, err),
+            first_draw=first_draw,
             years_left=int(self._num("years_left", 0, 15, err)),
             months_per_year=int(self._num("months_per_year", 0, 12, err)),
             draw_cap_on=bool(self.vars["draw_cap_on"].get()),
@@ -1792,6 +1835,7 @@ class App(tk.Tk):
             credit_deductible=self._num("credit_deductible", 0, 1e6, err),
             credit_max_loan=max_loan,
             pay_interest=PAY_MODES.index(self.vars["pay_interest"].get()),
+            initial_invest=initial,
             return_pct=float(self.vars["return_pct"].get()),
             tax_pct=self._num("tax_pct", 0, 99, err),
             account=self.vars["account"].get(),
@@ -1885,10 +1929,19 @@ class App(tk.Tk):
         self.sched_note.configure(text="\n".join(notes))
 
     # ---- laskenta ja päivitys ----------------------------------------------
+    def _sync_enabled(self):
+        """Sweet spot vaikuttaa vain, kun katto on päällä ja pääomitetut korot maksetaan
+        opintojen aikana (kerran vuodessa tai heti) – muuten kytkin on harmaana."""
+        on = (bool(self.vars["draw_cap_on"].get())
+              and PAY_MODES.index(self.vars["pay_interest"].get()) in (1, 2))
+        self.toggles["cap_plus_paid"].set_enabled(on)
+        self.sweet_lbl.configure(fg=C["muted"] if on else C["faint"])
+
     def recalc(self):
         self._job = None
         if self._loading_preset:
             return
+        self._sync_enabled()
         s, banks = self.read_inputs()
         if s is None:
             self.status.configure(text="⚠  Tarkista punaisella merkityt kentät – tulokset eivät päivity")
@@ -1913,20 +1966,21 @@ class App(tk.Tk):
         # info: laina, nostokatto ja sweet spot
         self.cap_text.set(f"Nosta vain hyvityskaton verran ({fmt_eur(s.credit_max_loan)})")
         if rc.months:
+            regular = [(ym, a) for ym, kind, a in rc.schedule if kind == "draw"]
+            how = (f"{len(regular)} nostoa, ensimmäinen {fmt_eur(regular[0][1])} {fmt_ym(regular[0][0])}, "
+                   f"viimeinen {fmt_ym(rc.last_draw)}")
             if s.draw_cap_on and s.draw_even and rc.drawn < rc.full_draw - 0.5:
-                how = f"{rc.n_support_months} kk × {fmt_eur(rc.drawn / rc.n_support_months)}"
-            else:
-                how = f"{rc.n_support_months} kk, {rc.n_draws} nostoa, viimeinen {fmt_ym(rc.last_draw)}"
+                how += f"; jokaisesta erästä {fmt_num(100 * (rc.drawn - rc.topup) / rc.full_draw)} %"
             txt = f"{cname}: nostat {fmt_eur(rc.drawn)} ({how})."
-            if s.draw_cap_on and s.cap_plus_paid:
-                if s.pay_interest in (1, 2):
-                    spots = ", ".join(f"{BANK_SHORT[b.name]} {fmt_eur(self.results[b.name].drawn)}" for b in banks)
-                    txt += (f" Sweet spot (katto + opintojen aikana maksettavat korot): {spots} → hyvityksen "
-                            f"pohjaksi jää tasan {fmt_eur(min(s.draw_cap, rc.credit_base))}.")
-                    if rc.topup > 0.005:
-                        txt += f" Lisäerä {fmt_eur(rc.topup, 2)} nostetaan {fmt_ym(rc.topup_month)} (ks. maksuaikataulu)."
-                else:
-                    txt += " (Sweet spot vaikuttaa vain, kun korkoja maksetaan opintojen aikana.)"
+            if s.draw_cap_on and s.pay_interest in (1, 2) and s.cap_plus_paid:
+                spots = ", ".join(f"{BANK_SHORT[b.name]} {fmt_eur(self.results[b.name].drawn)}" for b in banks)
+                txt += (f" Sweet spot (katto + opintojen aikana maksettavat korot): {spots} → hyvityksen "
+                        f"pohjaksi jää tasan {fmt_eur(min(s.draw_cap, rc.credit_base))}.")
+                if rc.topup > 0.005:
+                    txt += f" Lisäerä {fmt_eur(rc.topup, 2)} nostetaan {fmt_ym(rc.topup_month)} (ks. maksuaikataulu)."
+            elif s.draw_cap_on and s.pay_interest not in (1, 2):
+                txt += (" Sweet spot on harmaana: se vaikuttaa vain, kun pääomitetut korot maksetaan "
+                        "kerran vuodessa tai heti (Korko ja pääomitus).")
             if rc.full_draw > rc.drawn + 0.5:
                 txt += f" Täydellä nostolla saisit {fmt_eur(rc.full_draw)}."
             txt += f" Valmistut {fmt_ym(rc.graduation)}, hyvitys n. {fmt_ym(rc.credit_month)}."
@@ -2023,7 +2077,9 @@ class App(tk.Tk):
         self.kpi_note.configure(text=f"* korot + kulut − hyvitys − OP-bonukset (negatiivinen = maksat takaisin "
                                      f"vähemmän kuin nostit).\nSijoitusrivit: {s.account}, tuotto "
                                      f"{fmt_num(s.return_pct, 1)} %/v ennen kuluja, vero {fmt_num(s.tax_pct)} %, "
-                                     f"voitto verojen jälkeen.")
+                                     f"voitto verojen jälkeen."
+                                     + (f"\nAlkusijoitus {fmt_eur(s.initial_invest)} (omaa rahaa) on vähennetty "
+                                        f"sijoitusriveistä." if s.initial_invest > 0.5 else ""))
         self.update_chart()
 
     @staticmethod
@@ -2061,8 +2117,13 @@ class App(tk.Tk):
         txt = (f"Valittu maksutapa: laina maksettu {fmt_ym(res.payoff)}, salkkuun jää verojen jälkeen "
                f"{fmt_eur(res.payoff_after_tax)} ({s.account}).")
         if res.own_money > 0.5:
-            txt += (f"  Salkku ei riittänyt, omaa rahaa tarvittiin {fmt_eur(res.own_money)} "
-                    f"→ nettotulos {fmt_eur(res.payoff_net)}.")
+            txt += f"  Salkku ei riittänyt, omaa rahaa tarvittiin lisäksi {fmt_eur(res.own_money)}."
+        own_total = res.initial + res.own_money
+        if own_total > 0.5:
+            what = ("alkusijoitus ja lisäraha" if res.initial > 0.5 and res.own_money > 0.5
+                    else "alkusijoitus" if res.initial > 0.5 else "oma raha")
+            txt += (f"  Kun {what} ({fmt_eur(own_total)}) vähennetään, "
+                    f"nettotulos on {fmt_eur(res.payoff_net)}.")
         self.main_info.configure(text=txt, fg=C["sky"] if res.payoff_net >= 0 else C["red"])
         if show_alt and lump and lump.months:
             diff = lump.final_net_after_tax - res.final_net_after_tax
